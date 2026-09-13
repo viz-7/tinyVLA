@@ -1,6 +1,8 @@
 import math
 import torch
 import torch.nn as nn
+from torch.nn.modules import ReLU
+from tokenizer import FAST
 import torch.nn.functional as F
 
 class Config:
@@ -8,6 +10,7 @@ class Config:
   H = 8
   T = 100
   BASE = 1000
+  TEMP = 0.7
   def __init__(self) -> None:
     assert(self.D % self.H == 0)
     assert((self.D // self.H) % 2 == 0)
@@ -31,7 +34,7 @@ class RoPe(nn.Module):
     return (x * self.cos[:, :, :T]) + (x_neg * self.sin[:, :, :T])
 
 class causal_self_attention(nn.Module):
-  def __init__(self, config: Config, rope: RoPe):
+  def __init__(self, rope: RoPe, config: Config):
     super().__init__()
     self.config = config
     self.rope = rope
@@ -57,14 +60,71 @@ class causal_self_attention(nn.Module):
 
     return self.out_proj(y)
 
-
 class block(nn.Module):
-  def __init__(self) -> None:
+  def __init__(self, rope: RoPe, config: Config) -> None:
     super().__init__()
+    d = config.D
+    self.norm1 = nn.LayerNorm(d)
+    self.norm2 = nn.LayerNorm(d)
+    self.attn  = causal_self_attention(rope, config)
+    self.ffn = nn.Sequential(
+        nn.Linear(d, d*4),
+        nn.ReLU(),
+        nn.Linear(d*4, d*4),
+        nn.ReLU(),
+        nn.Linear(d*4, d)
+    )
+  def forward(self, x):
+    x = x + self.attn(self.norm1(x))
+    return x + self.ffn(self.norm2(x))
+
+class RGBEncoder(nn.Module):
+  def __init__(self, config: Config) -> None:
+    super().__init__()
+    self.encoder = nn.Sequential(
+        nn.Conv2d(3, 16, 5, stride=2, padding=2),
+        nn.ReLU(),
+        nn.Conv2d(16, 32, 3, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(32, 64, 3, stride=2, padding=1),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(64, config.D)
+    )
+  def forward(self, x):
+    x = x.permute(0, 3, 1, 2).float() / 255.0
+    return self.encoder(x)
 
 class VLA(nn.Module):
-  def __init__(self) -> None:
+  def __init__(self, tok: FAST, config: Config) -> None:
     super().__init__()
+    rope = RoPe(config)
+    self.config = config
+    self.tok = tok
+    self.emb_size = tok.vocab_size
+    self.emb = nn.Embedding(self.emb_size, config.D)
+    self.rgb_enc = RGBEncoder(config)
     self.blocks = nn.Sequential(
-        
+        block(rope, config),
+        block(rope, config),
+        block(rope, config)
       )
+    self.head = nn.Sequential(
+        nn.LayerNorm(config.D),
+        nn.Linear(config.D, config.D*3),
+        nn.ReLU(),
+        nn.Linear(config.D*3, config.D*3),
+        nn.ReLU(),
+        nn.Linear(config.D*3, self.emb_size),
+      )
+  def encoder_img(self, img): return self.rgb_enc(img).unsqueeze(1)
+  def forward(self, x, img_enc):
+    x = self.emb(x)
+    x = self.blocks(torch.cat([img_enc, x], dim=-2))
+    return self.head(x)
+  def sample(self, logits):
+    with torch.no_grad():
+      logits = logits[:, -1, :] / self.config.TEMP
+      probs = F.softmax(logits, dim=-1)
+      return torch.multinomial(probs, num_samples=1)

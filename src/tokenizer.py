@@ -9,9 +9,24 @@ class FAST:
   def __init__(self, merges) -> None:
     self.num_of_merges = merges
     self.vocab = {}
+    self.min = None
+  @property
+  def eos_id(self):
+    """Token reserved for the end of an action trajectory."""
+    return self.curId
+
+  @property
+  def pad_id(self):
+    """Token reserved for padding variable-length encoded trajectories."""
+    return self.curId + 1
+
+  @property
+  def vocab_size(self):
+    return self.curId + 2
   def train_bpe(self, chunks: list, mi, ma):
     vocab = {}
     curId = ma - mi + 1
+    self.min = mi
     for merge in tqdm(range(self.num_of_merges), desc="Training BPE"):
       localPairs = {}
       for chunk in chunks:
@@ -60,6 +75,7 @@ class FAST:
     new_chunk = []
     rev = {value: key for key, value in self.vocab.items()}
     for c in chunk:
+      if c == self.eos_id: break
       if c in rev: new_chunk.extend(self.decode(rev[c]))
       else: new_chunk.append(c)
     return new_chunk
@@ -87,4 +103,4 @@ def build_tokenizer(file=None):
   with open(file.with_suffix(".pkl"), "wb") as output: pickle.dump(fast, output)
   return fast
 
-build_tokenizer()
+if __name__ == "__main__": build_tokenizer()
